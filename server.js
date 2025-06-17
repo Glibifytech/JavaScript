@@ -4,30 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { createClient } = require('@supabase/supabase-js');
-const fs = require('fs');
-const path = require('path');
-
-// Load environment variables from env.example (in parent directory)
-const envPath = path.join(__dirname, '..', 'env.example');
-if (fs.existsSync(envPath)) {
-    const envData = fs.readFileSync(envPath, 'utf8');
-    const envLines = envData.split('\n');
-    
-    envLines.forEach(line => {
-        line = line.trim();
-        if (line && !line.startsWith('#') && line.includes('=')) {
-            const [key, ...valueParts] = line.split('=');
-            const value = valueParts.join('=').trim();
-            process.env[key.trim()] = value;
-        }
-    });
-    console.log('✅ Loaded environment variables from env.example');
-    console.log(`🔑 GEMINI_API_KEY: ${process.env.GEMINI_API_KEY ? 'Found' : 'Missing'}`);
-    console.log(`🔑 SUPABASE_URL: ${process.env.SUPABASE_URL ? 'Found' : 'Missing'}`);
-    console.log(`🔑 SUPABASE_ANON_KEY: ${process.env.SUPABASE_ANON_KEY ? 'Found' : 'Missing'}`);
-} else {
-    console.log('⚠️  env.example not found, using system environment variables');
-}
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,7 +17,7 @@ app.use(morgan('combined'));
 
 // Initialize Google Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash'});
+const model = genAI.getGenerativeModel({ model: 'google/gemma-3n-e4b-it:free' });
 
 // Initialize Supabase
 const supabase = createClient(
@@ -75,6 +52,7 @@ const verifyAuth = async (req, res, next) => {
 const getOrCreateConversation = async (userId, conversationId = null, title = 'New Chat') => {
     try {
         if (conversationId) {
+            // Check if conversation exists and belongs to user
             const { data, error } = await supabase
                 .from('conversations')
                 .select('*')
@@ -87,6 +65,7 @@ const getOrCreateConversation = async (userId, conversationId = null, title = 'N
             }
         }
 
+        // Create new conversation
         const { data, error } = await supabase
             .from('conversations')
             .insert({
@@ -227,16 +206,13 @@ app.post('/api/chat', verifyAuth, async (req, res) => {
             prompt.substring(0, 50) + '...'
         );
 
-        // Get conversation history for context BEFORE adding new message
+        // Get conversation history for context
         const history = await getConversationHistory(conversation.id);
-
-        // Save user message to database
-        await saveMessage(conversation.id, 'user', prompt);
 
         // Build context messages for Gemini
         let contextMessages = [];
         
-        // Add previous conversation history
+        // Add conversation history
         history.forEach(msg => {
             if (msg.role === 'user') {
                 contextMessages.push(`User: ${msg.content}`);
@@ -245,28 +221,24 @@ app.post('/api/chat', verifyAuth, async (req, res) => {
             }
         });
 
-        // Add current user message to context
+        // Add current user message
         contextMessages.push(`User: ${prompt}`);
 
-        // Create the full context with memory
-        let fullContext;
-        if (history.length > 0) {
-            // If there's conversation history, include it
-            const previousMessages = contextMessages.slice(0, -1).join('\n');
-            fullContext = `Previous conversation:\n${previousMessages}\n\nCurrent message:\n${prompt}\n\nPlease respond remembering our previous conversation and maintain context.`;
-        } else {
-            // First message in conversation
-            fullContext = prompt;
-        }
+        // Create the full context
+        const fullContext = contextMessages.length > 1 
+            ? `Previous conversation:\n${contextMessages.slice(0, -1).join('\n')}\n\nCurrent message:\n${prompt}`
+            : prompt;
 
-        console.log(`Context length: ${history.length + 1} messages (${history.length} previous + 1 current)`);
-        console.log(`Full context preview: ${fullContext.substring(0, 200)}...`);
+        console.log(`Context length: ${contextMessages.length} messages`);
 
         // Generate response with Gemini
         const result = await model.generateContent(fullContext);
         const response = await result.response;
         const aiResponse = response.text();
 
+        // Save user message
+        await saveMessage(conversation.id, 'user', prompt);
+        
         // Save AI response
         await saveMessage(conversation.id, 'assistant', aiResponse);
 
@@ -289,6 +261,7 @@ app.post('/api/chat', verifyAuth, async (req, res) => {
     } catch (error) {
         console.error('Error in chat endpoint:', error);
         
+        // Handle specific Gemini API errors
         if (error.message && error.message.includes('API_KEY')) {
             return res.status(500).json({ 
                 error: 'Invalid or missing Gemini API key. Please check your configuration.' 
@@ -353,11 +326,12 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
     console.log(`🤖 Chat endpoint: http://localhost:${PORT}/api/chat`);
     
+    // Check for required environment variables
     if (!process.env.GEMINI_API_KEY) {
-        console.warn('⚠️  WARNING: GEMINI_API_KEY not found');
+        console.warn('⚠️  WARNING: GEMINI_API_KEY not found in environment variables');
     }
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-        console.warn('⚠️  WARNING: Supabase credentials not found');
+        console.warn('⚠️  WARNING: Supabase credentials not found in environment variables');
     }
 });
 
